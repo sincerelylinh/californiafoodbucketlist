@@ -1,0 +1,761 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>California Food Bucket List</title>
+
+  <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@700;800;900&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'DM Sans', sans-serif; background: #f7f4f0; }
+    button { font-family: 'DM Sans', sans-serif; }
+    button:hover { opacity: 0.85; }
+    a:hover { opacity: 0.8; }
+    .leaflet-container { font-family: 'DM Sans', sans-serif; }
+    .leaflet-pane         { z-index: 1 !important; }
+    .leaflet-top,
+    .leaflet-bottom       { z-index: 2 !important; }
+    #modal-root { position: relative; z-index: 9999; }
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: #f0ede8; }
+    ::-webkit-scrollbar-thumb { background: #ccc; border-radius: 3px; }
+    .spinner {
+      width: 36px; height: 36px;
+      border: 4px solid #e0e0e0;
+      border-top-color: #2e86ab;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+      margin: 0 auto 12px;
+    }
+    .geo-spinner {
+      width: 14px; height: 14px;
+      border: 2px solid rgba(255,255,255,0.4);
+      border-top-color: white;
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+      display: inline-block;
+      vertical-align: middle;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .addr-row { display: flex; gap: 6px; align-items: flex-end; }
+    .addr-row input { flex: 1; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <div id="modal-root"></div>
+
+  <script type="text/babel">
+    const { useState, useRef, useEffect, useCallback } = React;
+
+    const ACCENT       = "#2e86ab";
+    const ACCENT_LIGHT = "#e8f4f8";
+
+    // ── Supabase ───────────────────────────────────────────────────────────────
+    const SUPABASE_URL = "https://qhtnkwfqvpexqwawacmo.supabase.co";
+    const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFodG5rd2ZxdnBleHF3YXdhY21vIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg1NDc1OTIsImV4cCI6MjA5NDEyMzU5Mn0.-KELx89o5z653MxfRjdxRiz043-vZJJuCeGr5EEwdDY";
+    const db = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+
+    async function fetchAllItems() {
+      const { data, error } = await db.from("california_items").select("*").order("created_at", { ascending: true });
+      if (error) throw error;
+      return data;
+    }
+
+    function dbRowToItem(row) {
+      return {
+        id: row.id, name: row.name, restaurant: row.restaurant,
+        notes: row.notes || "", tiktok: row.tiktok || "", emoji: row.emoji || "🍽️",
+        photo: row.photo || "", lat: row.lat, lon: row.lon,
+        address: row.address || "", googleMaps: row.google_maps || "", tried: row.tried || false,
+        category: row.category || "Meal",
+      };
+    }
+
+    async function insertItem(form) {
+      const { data, error } = await db.from("california_items").insert([{
+        name: form.name, restaurant: form.restaurant,
+        notes: form.notes || "", tiktok: form.tiktok || "",
+        emoji: form.emoji || "🍽️", photo: form.photo || "",
+        lat: form.lat, lon: form.lon, address: form.address || "", google_maps: form.googleMaps || "", category: form.category || "Meal", tried: false,
+      }]).select().single();
+      if (error) throw error;
+      return dbRowToItem(data);
+    }
+
+    async function updateItem(id, fields) {
+      const { error } = await db.from("california_items").update(fields).eq("id", id);
+      if (error) throw error;
+    }
+
+    async function deleteItem(id) {
+      const { error } = await db.from("california_items").delete().eq("id", id);
+      if (error) throw error;
+    }
+
+    // ── Geocoding ──────────────────────────────────────────────────────────────
+    async function geocodeAddress(address) {
+      const q = encodeURIComponent(address + ", California");
+      const url = `https://nominatim.openstreetmap.org/search?q=${q}&format=json&limit=1&countrycodes=us`;
+      const res = await fetch(url, { headers: { "Accept-Language": "en" } });
+      const data = await res.json();
+      if (!data || data.length === 0) throw new Error("Address not found. Try adding more detail.");
+      return { lat: parseFloat(data[0].lat), lon: parseFloat(data[0].lon) };
+    }
+
+    // ── Photo compression ──────────────────────────────────────────────────────
+    function compressPhoto(dataUrl) {
+      return new Promise(resolve => {
+        const img = new Image();
+        img.onload = () => {
+          const canvas = document.createElement("canvas");
+          const MAX = 800;
+          const ratio = Math.min(MAX / img.width, MAX / img.height, 1);
+          canvas.width  = Math.round(img.width  * ratio);
+          canvas.height = Math.round(img.height * ratio);
+          canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
+          resolve(canvas.toDataURL("image/jpeg", 0.75));
+        };
+        img.onerror = () => resolve(dataUrl);
+        img.src = dataUrl;
+      });
+    }
+
+    // ── Categories ────────────────────────────────────────────────────────────
+    const CATEGORIES = [
+      { key: "Meal",    label: "Meal",    emoji: "🍽️", color: "#e67e22" },
+      { key: "Snack",   label: "Snack",   emoji: "🍿", color: "#8e44ad" },
+      { key: "Dessert", label: "Dessert", emoji: "🍰", color: "#e91e8c" },
+      { key: "Drink",   label: "Drink",   emoji: "🥤", color: "#0097a7" },
+    ];
+    const CAT_MAP = Object.fromEntries(CATEGORIES.map(c => [c.key, c]));
+    const TRIED_COLOR = "#27ae60";
+
+    function getCatColor(item) {
+      if (item.tried) return TRIED_COLOR;
+      return CAT_MAP[item.category]?.color || "#888";
+    }
+
+    // ── LeafletMap ─────────────────────────────────────────────────────────────
+    function LeafletMap({ items, onToggleTried, pickMode, onPick, pendingPin, instanceRef }) {
+      const containerRef = useRef(null);
+      const mapRef       = useRef(null);
+      const markersRef   = useRef({});
+      const pendingRef   = useRef(null);
+      const pickModeRef  = useRef(pickMode);
+      const onPickRef    = useRef(onPick);
+      useEffect(() => { pickModeRef.current = pickMode; }, [pickMode]);
+      useEffect(() => { onPickRef.current   = onPick; },   [onPick]);
+
+      useEffect(() => {
+        if (instanceRef) {
+          instanceRef.current = {
+            get map()     { return mapRef.current; },
+            get markers() { return markersRef.current; },
+          };
+        }
+      });
+
+      useEffect(() => {
+        if (mapRef.current || !containerRef.current) return;
+        const map = L.map(containerRef.current, {
+          center: [36.7783, -119.4179], zoom: 6,
+          zoomControl: true, scrollWheelZoom: false,
+        });
+        L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+          attribution: "© <a href='https://www.openstreetmap.org/copyright'>OpenStreetMap</a>",
+          maxZoom: 19,
+        }).addTo(map);
+        map.on("click", e => {
+          if (!pickModeRef.current || !onPickRef.current) return;
+          onPickRef.current(e.latlng.lat, e.latlng.lng);
+        });
+        mapRef.current = map;
+        return () => { map.remove(); mapRef.current = null; markersRef.current = {}; pendingRef.current = null; };
+      }, []); // eslint-disable-line
+
+      useEffect(() => {
+        if (!mapRef.current) return;
+        mapRef.current.getContainer().style.cursor = pickMode ? "crosshair" : "";
+      }, [pickMode]);
+
+      useEffect(() => {
+        const map = mapRef.current; if (!map) return;
+        const currentIds = new Set(items.map(i => i.id));
+        Object.keys(markersRef.current).forEach(id => {
+          if (!currentIds.has(Number(id))) { markersRef.current[id].remove(); delete markersRef.current[id]; }
+        });
+        items.forEach(item => {
+          if (item.lat == null || item.lon == null) return;
+          const fill   = getCatColor(item);
+          const symbol = item.tried ? "✓" : (CAT_MAP[item.category]?.emoji || "★");
+          const icon = L.divIcon({
+            className: "",
+            html: `<div style="width:28px;height:28px;border-radius:50% 50% 50% 0;transform:rotate(-45deg);
+              background:${fill};border:3px solid white;box-shadow:0 2px 6px rgba(0,0,0,0.4);
+              display:flex;align-items:center;justify-content:center;cursor:pointer;">
+              <span style="transform:rotate(45deg);color:white;font-size:12px;font-weight:bold;line-height:1">${symbol}</span>
+            </div>`,
+            iconSize: [28, 28], iconAnchor: [14, 28], popupAnchor: [0, -30],
+          });
+          if (markersRef.current[item.id]) markersRef.current[item.id].remove();
+          const marker = L.marker([item.lat, item.lon], { icon }).addTo(map).bindPopup(`
+            <div style="font-family:'DM Sans',sans-serif;min-width:160px">
+              ${item.photo ? `<img src="${item.photo}" style="width:100%;height:90px;object-fit:cover;border-radius:6px;margin-bottom:6px;display:block"/>` : ""}
+              <div style="font-weight:700;font-size:13px;margin-bottom:2px">${item.name}</div>
+              <div style="font-size:11px;color:#888;margin-bottom:2px">🏠 ${item.restaurant}</div>
+              ${item.address ? `<div style="font-size:10px;color:#aaa;margin-bottom:4px">${item.address}</div>` : ""}
+              ${item.notes ? `<div style="font-size:11px;color:#555;font-style:italic;margin-bottom:4px">${item.notes}</div>` : ""}
+              ${item.tiktok ? `<a href="${item.tiktok}" target="_blank" style="font-size:11px;color:#000;font-weight:700">▶ TikTok</a>` : ""}
+              <div style="font-size:11px;color:${fill};font-weight:600;margin-top:4px">${item.tried ? "✓ Tried!" : "Not tried yet"}</div>
+            </div>
+          `);
+          if (!pickMode) { marker.on("click", e => { e.originalEvent.stopPropagation(); }); }
+          markersRef.current[item.id] = marker;
+        });
+      }, [items, onToggleTried, pickMode]); // eslint-disable-line
+
+      useEffect(() => {
+        const map = mapRef.current; if (!map) return;
+        if (pendingRef.current) { pendingRef.current.remove(); pendingRef.current = null; }
+        if (pendingPin) {
+          const icon = L.divIcon({
+            className: "",
+            html: `<div style="width:32px;height:32px;border-radius:50% 50% 50% 0;transform:rotate(-45deg);
+              background:#e74c3c;border:3px solid white;box-shadow:0 2px 8px rgba(0,0,0,0.5);
+              display:flex;align-items:center;justify-content:center;">
+              <span style="transform:rotate(45deg);font-size:16px">📍</span></div>`,
+            iconSize: [32, 32], iconAnchor: [16, 32],
+          });
+          pendingRef.current = L.marker([pendingPin.lat, pendingPin.lon], { icon, interactive: false }).addTo(map);
+          map.setView([pendingPin.lat, pendingPin.lon], Math.max(map.getZoom(), 14), { animate: true });
+        }
+      }, [pendingPin]);
+
+      const [locating, setLocating] = useState(false);
+      const locationMarkerRef = useRef(null);
+
+      const handleLocateMe = () => {
+        if (!navigator.geolocation) { alert("Geolocation is not supported by your browser."); return; }
+        setLocating(true);
+        navigator.geolocation.getCurrentPosition(
+          (pos) => {
+            const { latitude: lat, longitude: lng } = pos.coords;
+            const map = mapRef.current; if (!map) { setLocating(false); return; }
+            if (locationMarkerRef.current) { locationMarkerRef.current.remove(); locationMarkerRef.current = null; }
+            const icon = L.divIcon({
+              className: "",
+              html: `<div style="width:18px;height:18px;border-radius:50%;background:#4285f4;
+                border:3px solid white;box-shadow:0 0 0 4px rgba(66,133,244,0.3);"></div>`,
+              iconSize: [18, 18], iconAnchor: [9, 9],
+            });
+            locationMarkerRef.current = L.marker([lat, lng], { icon, zIndexOffset: 1000 })
+              .addTo(map).bindPopup("📍 You are here").openPopup();
+            map.setView([lat, lng], 14, { animate: true });
+            setLocating(false);
+          },
+          (err) => {
+            setLocating(false);
+            alert("Could not get your location. Make sure location access is allowed.");
+          },
+          { enableHighAccuracy: true, timeout: 10000 }
+        );
+      };
+
+      return (
+        <div onClick={e => e.stopPropagation()}
+          style={{ position: "relative", borderRadius: 12, overflow: "hidden", border: "1px solid #ddd" }}>
+          {pickMode && (
+            <div style={{ position: "absolute", top: 10, left: "50%", transform: "translateX(-50%)",
+                background: "rgba(0,0,0,0.72)", color: "white", borderRadius: 20,
+                padding: "5px 16px", fontSize: 12, fontWeight: 600, zIndex: 999,
+                pointerEvents: "none", whiteSpace: "nowrap" }}>
+              👆 Click anywhere on the map to fine-tune the pin
+            </div>
+          )}
+          {/* Locate me button */}
+          <button onClick={handleLocateMe} disabled={locating} title="Show my location"
+            style={{ position: "absolute", bottom: 16, right: 16, zIndex: 999,
+              background: "white", border: "2px solid #ccc", borderRadius: 10,
+              width: 40, height: 40, fontSize: 18, cursor: locating ? "default" : "pointer",
+              display: "flex", alignItems: "center", justifyContent: "center",
+              boxShadow: "0 2px 6px rgba(0,0,0,0.2)", opacity: locating ? 0.6 : 1 }}>
+            {locating ? "…" : "🎯"}
+          </button>
+          <div ref={containerRef} style={{ height: 420, width: "100%" }} />
+        </div>
+      );
+    }
+
+    // ── ItemModal ──────────────────────────────────────────────────────────────
+    const EMPTY_FORM = { restaurant: "", address: "", googleMaps: "", photo: "", tiktok: "", notes: "", emoji: "🍽️", category: "Meal", lat: null, lon: null };
+
+    function ItemModal({ initial, onSave, onClose }) {
+      const [form, setForm]           = useState(initial ? { ...initial } : { ...EMPTY_FORM });
+      const [picking, setPicking]     = useState(false);
+      const [saving, setSaving]       = useState(false);
+      const [geocoding, setGeocoding] = useState(false);
+      const [geoError, setGeoError]   = useState("");
+      const fileRef = useRef(null);
+      const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
+      const isEdit    = !!initial;
+      const pinPlaced = form.lat !== null && form.lon !== null;
+
+      const submit = async () => {
+        if (!form.restaurant.trim()) return;
+        setSaving(true);
+        // Use restaurant name as the item name since we removed the separate name field
+        try { await onSave({ ...form, name: form.restaurant }); onClose(); }
+        catch(err) { setSaving(false); alert("Save failed: " + err.message); }
+      };
+
+      const handlePhoto = async e => {
+        const file = e.target.files[0]; if (!file) return;
+        const reader = new FileReader();
+        reader.onload = async ev => { set("photo", await compressPhoto(ev.target.result)); };
+        reader.readAsDataURL(file);
+      };
+
+      const handlePick = useCallback((lat, lon) => {
+        setForm(f => ({ ...f, lat, lon }));
+      }, []);
+
+      const handleGeocode = async () => {
+        const addr = form.address.trim();
+        if (!addr) { setGeoError("Enter an address first."); return; }
+        setGeoError(""); setGeocoding(true);
+        try {
+          const { lat, lon } = await geocodeAddress(addr);
+          setForm(f => ({ ...f, lat, lon }));
+          setPicking(true);
+        } catch(err) {
+          setGeoError(err.message);
+        } finally { setGeocoding(false); }
+      };
+
+      const inp = { width: "100%", padding: "8px 10px", borderRadius: 8, border: "1px solid #ddd",
+                    fontSize: 13, fontFamily: "inherit", outline: "none", boxSizing: "border-box" };
+      const lbl = { fontSize: 11, fontWeight: 700, color: "#888", marginBottom: 3,
+                    letterSpacing: 0.4, display: "block" };
+
+      return ReactDOM.createPortal((
+        <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.55)",
+            display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+          <div onClick={e => e.stopPropagation()} style={{ background: "white", borderRadius: 18,
+              padding: 24, maxWidth: 520, width: "100%", boxShadow: "0 20px 60px rgba(0,0,0,0.3)",
+              maxHeight: "92vh", overflowY: "auto" }}>
+
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 18 }}>
+              <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 19, fontWeight: 700 }}>
+                {isEdit ? "Edit restaurant" : "Add restaurant"}
+              </div>
+              <button onClick={onClose} style={{ background: "none", border: "none", fontSize: 20,
+                  cursor: "pointer", color: "#999", lineHeight: 1 }}>✕</button>
+            </div>
+
+            {[
+              { k: "restaurant", label: "Restaurant / place name *", ph: "e.g. In-N-Out Burger" },
+              { k: "googleMaps", label: "Google Maps link",          ph: "https://maps.google.com/..." },
+              { k: "tiktok",     label: "TikTok / reference link",   ph: "https://www.tiktok.com/..." },
+              { k: "notes",      label: "Notes",                     ph: "Why you want to try it…" },
+            ].map(({ k, label, ph }) => (
+              <div key={k} style={{ marginBottom: 10 }}>
+                <label style={lbl}>{label}</label>
+                <input style={inp} placeholder={ph} value={form[k]} onChange={e => set(k, e.target.value)} />
+              </div>
+            ))}
+
+            {/* Address + geocode */}
+            <div style={{ marginBottom: 14 }}>
+              <label style={lbl}>📍 Address — auto-pin on map</label>
+              <div className="addr-row">
+                <input style={inp} placeholder="e.g. 123 W Katella Ave, Anaheim, CA"
+                  value={form.address} onChange={e => { set("address", e.target.value); setGeoError(""); }} />
+                <button onClick={handleGeocode} disabled={geocoding}
+                  style={{ whiteSpace: "nowrap", background: ACCENT, color: "white", border: "none",
+                    borderRadius: 8, padding: "8px 14px", fontSize: 12, fontWeight: 700,
+                    cursor: geocoding ? "default" : "pointer", flexShrink: 0 }}>
+                  {geocoding ? <><span className="geo-spinner" /> Finding…</> : "📌 Pin it"}
+                </button>
+              </div>
+              {geoError && <div style={{ fontSize: 11, color: "#e74c3c", marginTop: 4 }}>⚠️ {geoError}</div>}
+              {pinPlaced && !geoError && (
+                <div style={{ fontSize: 11, color: "#27ae60", marginTop: 4 }}>
+                  ✅ Pin placed at {form.lat.toFixed(5)}, {form.lon.toFixed(5)}
+                </div>
+              )}
+            </div>
+
+            {/* Map fine-tune */}
+            <div style={{ marginBottom: 18 }}>
+              <label style={lbl}>🗺️ Fine-tune pin on map</label>
+              {!picking ? (
+                <button onClick={() => setPicking(true)}
+                  style={{ width: "100%", padding: "10px", borderRadius: 8,
+                    border: `2px dashed ${ACCENT}`, background: pinPlaced ? `${ACCENT}15` : "#fafafa",
+                    color: ACCENT, fontSize: 13, fontWeight: 700, cursor: "pointer",
+                    display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}>
+                  {pinPlaced ? "✅ Pin placed — click to open map & adjust" : "🗺️ Open map to drop pin manually"}
+                </button>
+              ) : (
+                <div>
+                  <LeafletMap items={[]} pickMode={true} onPick={handlePick}
+                    pendingPin={pinPlaced ? { lat: form.lat, lon: form.lon } : null} />
+                  <button onClick={() => setPicking(false)}
+                    style={{ marginTop: 8, width: "100%", padding: "9px", borderRadius: 8, border: "none",
+                      background: pinPlaced ? ACCENT : "#ddd", color: pinPlaced ? "white" : "#888",
+                      fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
+                    {pinPlaced ? "✓ Done — pin placed" : "Click the map above to place a pin"}
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {/* Category */}
+            <div style={{ marginBottom: 14 }}>
+              <label style={lbl}>Category</label>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                {CATEGORIES.map(cat => (
+                  <button key={cat.key} onClick={() => set("category", cat.key)}
+                    style={{ padding: "7px 14px", borderRadius: 20, fontSize: 13, fontWeight: 600,
+                      cursor: "pointer", border: `2px solid ${cat.color}`,
+                      background: form.category === cat.key ? cat.color : "white",
+                      color: form.category === cat.key ? "white" : cat.color }}>
+                    {cat.emoji} {cat.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Photo */}
+            <div style={{ marginBottom: 18 }}>
+              <label style={lbl}>Photo</label>
+              <input ref={fileRef} type="file" accept="image/*" style={{ display: "none" }} onChange={handlePhoto} />
+              {form.photo ? (
+                <div style={{ position: "relative", borderRadius: 10, overflow: "hidden", border: "1px solid #ddd" }}>
+                  <img src={form.photo} alt="preview" style={{ width: "100%", height: 140, objectFit: "cover", display: "block" }} />
+                  <button onClick={() => { set("photo", ""); if (fileRef.current) fileRef.current.value = ""; }}
+                    style={{ position: "absolute", top: 8, right: 8, background: "rgba(0,0,0,0.6)", color: "white",
+                      border: "none", borderRadius: "50%", width: 28, height: 28, fontSize: 14, cursor: "pointer",
+                      display: "flex", alignItems: "center", justifyContent: "center" }}>✕</button>
+                </div>
+              ) : (
+                <button onClick={() => fileRef.current?.click()}
+                  style={{ width: "100%", padding: "11px", borderRadius: 8, border: "2px dashed #ddd",
+                    background: "#fafafa", color: "#aaa", fontSize: 13, cursor: "pointer",
+                    display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
+                  📷 Upload a photo
+                </button>
+              )}
+            </div>
+
+            <button onClick={submit} disabled={saving}
+              style={{ width: "100%", background: saving ? "#aaa" : ACCENT, color: "white", border: "none",
+                borderRadius: 10, padding: "13px 0", fontSize: 14, fontWeight: 700,
+                cursor: saving ? "default" : "pointer" }}>
+              {saving ? "Saving…" : isEdit ? "Save changes ✓" : "Add restaurant ✨"}
+            </button>
+          </div>
+        </div>
+      ), document.getElementById("modal-root"));
+    }
+
+    // ── FoodCard ───────────────────────────────────────────────────────────────
+    function FoodCard({ item, onToggleTried, onDelete, onEdit, onLocate }) {
+      const [toggling, setToggling] = useState(false);
+      const [deleting, setDeleting] = useState(false);
+
+      const handleToggle = async () => { setToggling(true); await onToggleTried(item.id); setToggling(false); };
+      const handleDelete = async () => { setDeleting(true); await onDelete(item.id); };
+
+      return (
+        <div style={{ background: "white", borderRadius: 14, overflow: "hidden",
+            boxShadow: "0 2px 10px rgba(0,0,0,0.07)",
+            border: item.tried ? "2px solid #27ae60" : "1px solid #e8e8e8",
+            position: "relative", opacity: deleting ? 0.5 : 1 }}>
+          {item.tried && (
+            <div style={{ position: "absolute", top: 8, right: 8, background: "#27ae60", color: "white",
+                borderRadius: 20, padding: "2px 10px", fontSize: 11, fontWeight: 700, zIndex: 2 }}>✓ TRIED</div>
+          )}
+          {item.photo
+            ? <img src={item.photo} alt={item.name}
+                style={{ width: "100%", height: 200, objectFit: "cover", display: "block" }} />
+            : null}
+          <div style={{ padding: "12px 14px 14px" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
+              {item.category && CAT_MAP[item.category] && (
+                <span style={{ fontSize: 11, fontWeight: 700, padding: "2px 8px", borderRadius: 20,
+                  background: CAT_MAP[item.category].color + "18",
+                  color: CAT_MAP[item.category].color, border: `1px solid ${CAT_MAP[item.category].color}40` }}>
+                  {CAT_MAP[item.category].emoji} {CAT_MAP[item.category].label}
+                </span>
+              )}
+            </div>
+            <div style={{ fontFamily: "'Playfair Display',serif", fontWeight: 700, fontSize: 15,
+                color: "#111", marginBottom: 2 }}>{item.restaurant}</div>
+            {item.address && (
+              <div style={{ fontSize: 11, color: "#bbb", marginBottom: 7 }}>📍 {item.address}</div>
+            )}
+            {item.notes && (
+              <div style={{ background: ACCENT_LIGHT, borderRadius: 7, padding: "5px 9px",
+                  fontSize: 12, color: "#555", marginBottom: 9, fontStyle: "italic" }}>{item.notes}</div>
+            )}
+            <div style={{ display: "flex", gap: 6 }}>
+              {item.googleMaps && (
+                <a href={item.googleMaps} target="_blank" rel="noreferrer"
+                  style={{ flex: 1, background: "#4285F4", color: "white", borderRadius: 7,
+                    padding: "7px 0", textAlign: "center", fontSize: 12, fontWeight: 700, textDecoration: "none" }}>
+                  🧭 Directions
+                </a>
+              )}
+              {item.tiktok && (
+                <a href={item.tiktok} target="_blank" rel="noreferrer"
+                  style={{ flex: 1, background: "#000", color: "white", borderRadius: 7,
+                    padding: "7px 0", textAlign: "center", fontSize: 12, fontWeight: 700, textDecoration: "none" }}>
+                  ▶ TikTok
+                </a>
+              )}
+              <button onClick={handleToggle} disabled={toggling}
+                style={{ flex: 1, background: item.tried ? "#e8f8ee" : ACCENT_LIGHT,
+                  color: item.tried ? "#27ae60" : ACCENT,
+                  border: `1.5px solid ${item.tried ? "#27ae60" : ACCENT}`,
+                  borderRadius: 7, padding: "7px 0", fontSize: 12, fontWeight: 700,
+                  cursor: toggling ? "default" : "pointer" }}>
+                {toggling ? "…" : item.tried ? "✓ Tried!" : "Mark tried"}
+              </button>
+              {item.lat != null && item.lon != null && (
+                <button onClick={() => onLocate(item)} title="Show on map"
+                  style={{ width: 34, background: "#f0fff4", color: "#27ae60",
+                    border: "1px solid #b2dfcc", borderRadius: 7, fontSize: 15, cursor: "pointer" }}>📍</button>
+              )}
+              <button onClick={() => onEdit(item)}
+                style={{ width: 34, background: "#f0f4ff", color: "#2980b9",
+                  border: "1px solid #c8daf5", borderRadius: 7, fontSize: 15, cursor: "pointer" }}>✏️</button>
+              <button onClick={handleDelete} disabled={deleting}
+                style={{ width: 34, background: "#fff5f5", color: "#e63946",
+                  border: "1px solid #fcc", borderRadius: 7, fontSize: 15, cursor: "pointer" }}>✕</button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // ── CategoryList ───────────────────────────────────────────────────────────
+    function CategoryList({ items, onToggleTried, onDelete, onEdit, onLocate }) {
+      const [activeTab, setActiveTab] = useState("All");
+      const tabs = ["All", ...CATEGORIES.map(c => c.key)];
+      const filtered = activeTab === "All" ? items : items.filter(i => i.category === activeTab);
+
+      return (
+        <>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 16 }}>
+            {tabs.map(tab => {
+              const cat = CAT_MAP[tab];
+              const color = cat ? cat.color : ACCENT;
+              const isActive = activeTab === tab;
+              return (
+                <button key={tab} onClick={() => setActiveTab(tab)}
+                  style={{ padding: "6px 14px", borderRadius: 20, fontSize: 13, fontWeight: 600,
+                    cursor: "pointer", border: `2px solid ${color}`,
+                    background: isActive ? color : "white",
+                    color: isActive ? "white" : color }}>
+                  {cat ? `${cat.emoji} ${cat.label}` : `🍽 All (${items.length})`}
+                </button>
+              );
+            })}
+          </div>
+
+          {filtered.length === 0
+            ? <div style={{ background: "#fafafa", borderRadius: 12, padding: "40px 20px",
+                  textAlign: "center", color: "#ccc", fontSize: 14 }}>No restaurants yet — add your first one!</div>
+            : activeTab !== "All"
+              ? <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(260px,1fr))", gap: 14 }}>
+                  {filtered.map(item => (
+                    <FoodCard key={item.id} item={item}
+                      onToggleTried={onToggleTried} onDelete={onDelete}
+                      onEdit={onEdit} onLocate={onLocate} />
+                  ))}
+                </div>
+              : CATEGORIES.map(cat => {
+                  const catItems = items.filter(i => i.category === cat.key);
+                  if (catItems.length === 0) return null;
+                  return (
+                    <div key={cat.key} style={{ marginBottom: 28 }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
+                        <span style={{ fontSize: 18 }}>{cat.emoji}</span>
+                        <span style={{ fontFamily: "'Playfair Display',serif", fontSize: 17, fontWeight: 800, color: cat.color }}>{cat.label}s</span>
+                        <span style={{ fontSize: 12, color: "#aaa", fontWeight: 500 }}>({catItems.length})</span>
+                      </div>
+                      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(260px,1fr))", gap: 14 }}>
+                        {catItems.map(item => (
+                          <FoodCard key={item.id} item={item}
+                            onToggleTried={onToggleTried} onDelete={onDelete}
+                            onEdit={onEdit} onLocate={onLocate} />
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })
+          }
+        </>
+      );
+    }
+
+    // ── App ────────────────────────────────────────────────────────────────────
+    function App() {
+      const [items,   setItems]   = useState([]);
+      const [loading, setLoading] = useState(true);
+      const [error,   setError]   = useState(null);
+      const [modal,   setModal]   = useState(null);
+      const mapSectionRef         = useRef(null);
+      const leafletRef            = useRef(null);
+
+      useEffect(() => {
+        fetchAllItems()
+          .then(rows => { setItems(rows.map(dbRowToItem)); setLoading(false); })
+          .catch(err  => { setError(err.message); setLoading(false); });
+      }, []);
+
+      const handleAdd = async form => {
+        const newItem = await insertItem(form);
+        setItems(prev => [...prev, newItem]);
+      };
+
+      const handleEdit = async (id, form) => {
+        await updateItem(id, {
+          name: form.name, restaurant: form.restaurant,
+          notes: form.notes, tiktok: form.tiktok,
+          emoji: form.emoji, photo: form.photo,
+          lat: form.lat, lon: form.lon, address: form.address, google_maps: form.googleMaps || "",
+          category: form.category || "Meal",
+        });
+        setItems(prev => prev.map(it => it.id === id ? { ...it, ...form } : it));
+      };
+
+      const handleDelete = async id => {
+        await deleteItem(id);
+        setItems(prev => prev.filter(it => it.id !== id));
+      };
+
+      const handleToggleTried = async id => {
+        const item = items.find(it => it.id === id); if (!item) return;
+        const newTried = !item.tried;
+        await updateItem(id, { tried: newTried });
+        setItems(prev => prev.map(it => it.id === id ? { ...it, tried: newTried } : it));
+      };
+
+      const handleLocate = item => {
+        mapSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+        setTimeout(() => {
+          const lm = leafletRef.current;
+          if (!lm || !lm.map) return;
+          const marker = lm.markers[item.id];
+          if (!marker) return;
+          lm.map.setView([item.lat, item.lon], 16, { animate: true });
+          marker.openPopup();
+        }, 500);
+      };
+
+      const handleSave = async form => {
+        if (modal.mode === "add") await handleAdd(form);
+        else await handleEdit(modal.item.id, form);
+      };
+
+      const tried = items.filter(i => i.tried).length;
+      const pct   = items.length ? Math.round((tried / items.length) * 100) : 0;
+
+      if (loading) return (
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "center",
+            justifyContent: "center", height: "100vh", color: "#aaa" }}>
+          <div className="spinner" />
+          <div style={{ fontSize: 14 }}>Loading your restaurants…</div>
+        </div>
+      );
+
+      if (error) return (
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "center",
+            justifyContent: "center", height: "100vh", color: "#e74c3c", textAlign: "center", padding: 20 }}>
+          <div style={{ fontSize: 32, marginBottom: 12 }}>⚠️</div>
+          <div style={{ fontWeight: 700, marginBottom: 8 }}>Couldn't connect to database</div>
+          <div style={{ fontSize: 13, color: "#aaa" }}>{error}</div>
+        </div>
+      );
+
+      return (
+        <div style={{ maxWidth: 980, margin: "0 auto", padding: "40px 20px 100px" }}>
+
+          {modal && (
+            <ItemModal
+              initial={modal.mode === "edit" ? { ...modal.item } : null}
+              onSave={handleSave}
+              onClose={() => setModal(null)} />
+          )}
+
+          {/* Header */}
+          <div style={{ textAlign: "center", marginBottom: 40 }}>
+            <div style={{ fontSize: 42, marginBottom: 8 }}>🌊🍜</div>
+            <h1 style={{ fontFamily: "'Playfair Display',serif", fontSize: 40, fontWeight: 900,
+                color: "#111", letterSpacing: -0.5, marginBottom: 10 }}>California Food Bucket List</h1>
+            <p style={{ color: "#aaa", fontSize: 14 }}>Every snack, bite, and sip you want to try across California.</p>
+          </div>
+
+          {/* Stats bar */}
+          <div style={{ background: ACCENT_LIGHT, borderRadius: 16, padding: "20px 24px",
+              marginBottom: 24, display: "flex", alignItems: "center", justifyContent: "space-between",
+              flexWrap: "wrap", gap: 12, borderLeft: `5px solid ${ACCENT}` }}>
+            <div>
+              <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 22, fontWeight: 800,
+                  color: ACCENT, lineHeight: 1.2 }}>Restaurants to Try</div>
+              <div style={{ fontSize: 13, color: "#999", marginTop: 4 }}>{tried}/{items.length} restaurants tried</div>
+              <div style={{ marginTop: 8, height: 5, width: 200, background: "#d0e8f0", borderRadius: 3, overflow: "hidden" }}>
+                <div style={{ height: "100%", width: `${pct}%`, background: ACCENT,
+                    borderRadius: 3, transition: "width 0.4s" }} />
+              </div>
+            </div>
+            <button onClick={() => setModal({ mode: "add" })}
+              style={{ background: ACCENT, color: "white", border: "none",
+                borderRadius: 10, padding: "11px 20px", fontSize: 14, fontWeight: 700, cursor: "pointer" }}>
+              + Add restaurant
+            </button>
+          </div>
+
+          {/* Single shared map */}
+          <div ref={mapSectionRef} style={{ marginBottom: 24 }}>
+            <div style={{ fontSize: 13, fontWeight: 600, color: "#888", marginBottom: 8 }}>
+              📍 Click a pin to see details · green = tried
+            </div>
+            <LeafletMap items={items} onToggleTried={handleToggleTried}
+              pickMode={false} instanceRef={leafletRef} />
+          </div>
+
+          <CategoryList
+            items={items}
+            onToggleTried={handleToggleTried}
+            onDelete={handleDelete}
+            onEdit={i => setModal({ mode: "edit", item: i })}
+            onLocate={handleLocate}
+          />
+
+          <div style={{ textAlign: "center", marginTop: 20 }}>
+            <button onClick={() => mapSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" })}
+              style={{ background: "white", border: "1px solid #ddd", borderRadius: 8, padding: "7px 18px",
+                fontSize: 12, fontWeight: 600, cursor: "pointer", color: "#666" }}>
+              ↑ Back to map
+            </button>
+          </div>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+  </script>
+</body>
+</html>
