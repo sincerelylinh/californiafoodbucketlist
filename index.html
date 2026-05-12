@@ -512,14 +512,16 @@
               {item.googleMaps && (
                 <a href={item.googleMaps} target="_blank" rel="noreferrer"
                   style={{ flex: 1, background: "#4285F4", color: "white", borderRadius: 7,
-                    padding: "7px 0", textAlign: "center", fontSize: 12, fontWeight: 700, textDecoration: "none" }}>
+                    padding: "7px 0", textAlign: "center", fontSize: 12, fontWeight: 700, textDecoration: "none",
+                    display: "flex", alignItems: "center", justifyContent: "center" }}>
                   Directions
                 </a>
               )}
               {item.tiktok && (
                 <a href={item.tiktok} target="_blank" rel="noreferrer"
                   style={{ flex: 1, background: "#000", color: "white", borderRadius: 7,
-                    padding: "7px 0", textAlign: "center", fontSize: 12, fontWeight: 700, textDecoration: "none" }}>
+                    padding: "7px 0", textAlign: "center", fontSize: 12, fontWeight: 700, textDecoration: "none",
+                    display: "flex", alignItems: "center", justifyContent: "center" }}>
                   TikTok
                 </a>
               )}
@@ -567,7 +569,7 @@
                     cursor: "pointer", border: `2px solid ${color}`, whiteSpace: "nowrap", flexShrink: 0,
                     background: isActive ? color : "white",
                     color: isActive ? "white" : color }}>
-                  {cat ? `${cat.emoji} ${cat.label}` : `All (${items.length})`}
+                  {cat ? cat.label : `All (${items.length})`}
                 </button>
               );
             })}
